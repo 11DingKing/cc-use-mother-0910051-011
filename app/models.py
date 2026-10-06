@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Date, DateTime, ForeignKey, Text, Enum, Float, Boolean
+from sqlalchemy import Column, Integer, String, Date, DateTime, ForeignKey, Text, Enum, Float, Boolean, Index, text
 from sqlalchemy.orm import relationship
 from datetime import datetime
 import enum
@@ -54,6 +54,29 @@ class CluePriority(str, enum.Enum):
     HIGH = "高"
     MEDIUM = "中"
     LOW = "低"
+
+
+class LeaseStatus(str, enum.Enum):
+    ACTIVE = "持有中"
+    RELEASED = "主动释放"
+    EXPIRED = "超时回收"
+    REASSIGNED = "强制转派"
+    COMPLETED = "随结案终结"
+
+
+class LeaseEventType(str, enum.Enum):
+    CLAIM = "认领"
+    RENEW = "续租"
+    RELEASE = "主动释放"
+    EXPIRE = "超时回收"
+    REASSIGN = "强制转派"
+    COMPLETE = "结案终结"
+
+
+class UserRole(str, enum.Enum):
+    INSPECTOR = "核查员"
+    SUPERVISOR = "主管"
+    ADMIN = "管理员"
 
 
 class ComplianceGrade(str, enum.Enum):
@@ -244,12 +267,18 @@ class ViolationClue(Base):
     assigned_at = Column(DateTime)
     conclusion = Column(Text)
     verified_at = Column(DateTime)
+    # —— 举报人敏感信息（按角色裁剪，不参与列表返回）——
+    informant_name = Column(String(100))
+    informant_phone = Column(String(50))
+    informant_id_card = Column(String(50))
+    informant_contact_detail = Column(Text)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     institution = relationship("Institution", back_populates="clues")
     procedure = relationship("Procedure")
     inspection_records = relationship("InspectionRecord", back_populates="clue", cascade="all, delete-orphan")
+    leases = relationship("ClueLease", back_populates="clue", cascade="all, delete-orphan")
 
 
 class InspectionRecord(Base):
@@ -264,6 +293,61 @@ class InspectionRecord(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
     clue = relationship("ViolationClue", back_populates="inspection_records")
+
+
+class ClueLease(Base):
+    """线索认领租约：同一线索至多存在一条 ACTIVE 租约（由部分唯一索引保证）。"""
+    __tablename__ = "clue_leases"
+
+    id = Column(Integer, primary_key=True, index=True)
+    clue_id = Column(Integer, ForeignKey("violation_clues.id"), nullable=False, index=True)
+    holder = Column(String(100), nullable=False)
+    holder_role = Column(Enum(UserRole), nullable=False, default=UserRole.INSPECTOR)
+    status = Column(Enum(LeaseStatus), nullable=False, default=LeaseStatus.ACTIVE, index=True)
+    version = Column(Integer, nullable=False, default=1)
+    leased_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    expires_at = Column(DateTime, nullable=False)
+    released_at = Column(DateTime)
+    # 认领时固定的证据摘要：内容随租约快照冻结，哈希对同一线索的实质证据稳定
+    evidence_summary = Column(Text, nullable=False)
+    evidence_hash = Column(String(64), nullable=False, index=True)
+    # 认领时固定的办理权限快照
+    permissions = Column(Text, nullable=False, default="")
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    clue = relationship("ViolationClue", back_populates="leases")
+    events = relationship("ClueLeaseEvent", back_populates="lease", cascade="all, delete-orphan")
+
+    __table_args__ = (
+        # 一条线索只允许一条“持有中”租约——并发认领在数据库层决胜负
+        Index(
+            "ux_clue_lease_active",
+            "clue_id",
+            unique=True,
+            sqlite_where=text("status = 'ACTIVE'"),
+            postgresql_where=text("status = 'ACTIVE'"),
+        ),
+    )
+
+
+class ClueLeaseEvent(Base):
+    """租约生命周期审计事件：续租、释放、回收、转派均落原因，只追加不改写。"""
+    __tablename__ = "clue_lease_events"
+
+    id = Column(Integer, primary_key=True, index=True)
+    lease_id = Column(Integer, ForeignKey("clue_leases.id"), nullable=False, index=True)
+    clue_id = Column(Integer, ForeignKey("violation_clues.id"), nullable=False, index=True)
+    event_type = Column(Enum(LeaseEventType), nullable=False)
+    actor = Column(String(100), nullable=False)
+    reason = Column(Text, nullable=False, default="")
+    from_holder = Column(String(100))
+    to_holder = Column(String(100))
+    version_before = Column(Integer)
+    version_after = Column(Integer)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    lease = relationship("ClueLease", back_populates="events")
 
 
 class ComplianceScore(Base):

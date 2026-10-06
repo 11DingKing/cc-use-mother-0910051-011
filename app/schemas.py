@@ -4,7 +4,8 @@ from typing import Optional, List
 from .models import (
     InstitutionType, ProcedureCategory, SurgeryLevel,
     QualificationType, ClueType, ClueStatus, CluePriority,
-    ComplianceGrade, ScoreItem, InspectionFrequency, PlanStatus
+    ComplianceGrade, ScoreItem, InspectionFrequency, PlanStatus,
+    LeaseStatus, LeaseEventType, UserRole,
 )
 
 
@@ -229,7 +230,10 @@ class ViolationClueBase(BaseModel):
 
 
 class ViolationClueCreate(ViolationClueBase):
-    pass
+    informant_name: Optional[str] = None
+    informant_phone: Optional[str] = None
+    informant_id_card: Optional[str] = None
+    informant_contact_detail: Optional[str] = None
 
 
 class ViolationClueUpdate(BaseModel):
@@ -244,6 +248,10 @@ class ViolationClueUpdate(BaseModel):
     status: Optional[ClueStatus] = None
     assignee: Optional[str] = None
     conclusion: Optional[str] = None
+    informant_name: Optional[str] = None
+    informant_phone: Optional[str] = None
+    informant_id_card: Optional[str] = None
+    informant_contact_detail: Optional[str] = None
 
 
 class ViolationClue(ViolationClueBase):
@@ -255,6 +263,8 @@ class ViolationClue(ViolationClueBase):
     verified_at: Optional[datetime] = None
     created_at: datetime
     updated_at: datetime
+    # 举报人明文不进入通用响应，按角色裁剪通过详情/租约接口获取
+    current_lease: Optional["ClueLeaseView"] = None
 
     class Config:
         from_attributes = True
@@ -262,11 +272,107 @@ class ViolationClue(ViolationClueBase):
 
 class ClueAssign(BaseModel):
     assignee: str
+    assignee_role: UserRole = UserRole.INSPECTOR
+    ttl_minutes: Optional[int] = None
+    reason: Optional[str] = None
 
 
 class ClueConclusion(BaseModel):
     status: ClueStatus
     conclusion: str
+    # 租约凭证：结案必须持有当前版本；为空时仅允许旧流程兼容（持有人=assignee）
+    holder: Optional[str] = None
+    lease_id: Optional[int] = None
+    lease_version: Optional[int] = None
+
+
+class InformantView(BaseModel):
+    name: Optional[str] = None
+    phone: Optional[str] = None
+    id_card: Optional[str] = None
+    contact_detail: Optional[str] = None
+    masked: bool = True
+
+
+class ClueLeaseRequest(BaseModel):
+    holder: str = Field(..., min_length=1)
+    holder_role: UserRole = UserRole.INSPECTOR
+    ttl_minutes: Optional[int] = Field(None, ge=1, le=60 * 24 * 30)
+    reason: Optional[str] = None
+
+
+class ClueLeaseRenew(BaseModel):
+    holder: str = Field(..., min_length=1)
+    lease_id: int
+    version: int
+    ttl_minutes: Optional[int] = Field(None, ge=1, le=60 * 24 * 7)
+    reason: str = Field(..., min_length=1)
+
+
+class ClueLeaseRelease(BaseModel):
+    holder: str = Field(..., min_length=1)
+    lease_id: int
+    version: int
+    reason: str = Field(..., min_length=1)
+
+
+class ClueLeaseReassign(BaseModel):
+    supervisor: str = Field(..., min_length=1)
+    to_holder: str = Field(..., min_length=1)
+    to_role: UserRole = UserRole.INSPECTOR
+    reason: str = Field(..., min_length=1)
+
+
+class ClueLeaseView(BaseModel):
+    id: int
+    clue_id: int
+    holder: str
+    holder_role: UserRole
+    status: LeaseStatus
+    version: int
+    leased_at: datetime
+    expires_at: datetime
+    released_at: Optional[datetime] = None
+    evidence_summary: str
+    evidence_hash: str
+    permissions: List[str] = []
+
+    class Config:
+        from_attributes = True
+
+
+class ClueLeaseEventView(BaseModel):
+    id: int
+    lease_id: int
+    clue_id: int
+    event_type: LeaseEventType
+    actor: str
+    reason: str
+    from_holder: Optional[str] = None
+    to_holder: Optional[str] = None
+    version_before: Optional[int] = None
+    version_after: Optional[int] = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class ClueDetailView(ViolationClue):
+    informant: Optional[InformantView] = None
+    events: List[ClueLeaseEventView] = []
+
+
+class LeaseRecoverResult(BaseModel):
+    expired_count: int
+    reassigned_count: int
+    expired_lease_ids: List[int] = []
+    reassigned_lease_ids: List[int] = []
+
+
+class LeaseRecoverRequest(BaseModel):
+    auto_reassign_to: Optional[str] = None
+    reason: Optional[str] = None
 
 
 class InspectionRecordBase(BaseModel):
@@ -278,7 +384,9 @@ class InspectionRecordBase(BaseModel):
 
 
 class InspectionRecordCreate(InspectionRecordBase):
-    pass
+    # 租约凭证：提交核查记录必须持有当前版本
+    lease_id: Optional[int] = None
+    lease_version: Optional[int] = None
 
 
 class InspectionRecord(InspectionRecordBase):
@@ -482,3 +590,8 @@ class ComplianceGradeDistribution(BaseModel):
     count: int
     percentage: float
     score_range: str
+
+
+# 重建含前向引用（current_lease -> ClueLeaseView）的模型
+ViolationClue.model_rebuild()
+ClueDetailView.model_rebuild()

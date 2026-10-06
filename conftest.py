@@ -5,7 +5,7 @@ from datetime import date, datetime, timedelta
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
 from fastapi.testclient import TestClient
 
@@ -50,13 +50,25 @@ def TestSessionLocal(test_engine):
 
 
 @pytest.fixture
-def db_session(TestSessionLocal, test_engine):
+def db_session(test_engine, TestSessionLocal):
     connection = test_engine.connect()
     transaction = connection.begin()
     session = TestSessionLocal(bind=connection)
+
+    # 服务层会在请求内 commit/rollback。开启嵌套事务（SAVEPOINT）并在每次
+    # 内层事务结束后重建保存点，使服务层的提交只释放保存点；测试结束由外层
+    # 事务统一回滚，保证用例间数据隔离（含触发 rollback 的租约冲突场景）。
+    nested = connection.begin_nested()
+
+    @event.listens_for(session, "after_transaction_end")
+    def restart_savepoint(session, transaction):
+        if transaction.nested and not transaction._parent.nested:
+            connection.begin_nested()
+
     try:
         yield session
     finally:
+        event.remove(session, "after_transaction_end", restart_savepoint)
         session.close()
         transaction.rollback()
         connection.close()
