@@ -1,10 +1,11 @@
 from pydantic import BaseModel, Field
 from datetime import date, datetime
-from typing import Optional, List
+from typing import Optional, List, Any, Dict
 from .models import (
     InstitutionType, ProcedureCategory, SurgeryLevel,
     QualificationType, ClueType, ClueStatus, CluePriority,
-    ComplianceGrade, ScoreItem, InspectionFrequency, PlanStatus
+    ComplianceGrade, ScoreItem, InspectionFrequency, PlanStatus,
+    UserRole,
 )
 
 
@@ -229,7 +230,10 @@ class ViolationClueBase(BaseModel):
 
 
 class ViolationClueCreate(ViolationClueBase):
-    pass
+    reporter_name: Optional[str] = Field(None, description="举报人姓名（敏感）")
+    reporter_phone: Optional[str] = Field(None, description="举报人联系方式（敏感）")
+    reporter_id_card: Optional[str] = Field(None, description="举报人身份证号（敏感）")
+    reporter_address: Optional[str] = Field(None, description="举报人住址（敏感）")
 
 
 class ViolationClueUpdate(BaseModel):
@@ -240,6 +244,10 @@ class ViolationClueUpdate(BaseModel):
     practitioner_id: Optional[int] = None
     procedure_id: Optional[int] = None
     source: Optional[str] = None
+    reporter_name: Optional[str] = None
+    reporter_phone: Optional[str] = None
+    reporter_id_card: Optional[str] = None
+    reporter_address: Optional[str] = None
     priority: Optional[CluePriority] = None
     status: Optional[ClueStatus] = None
     assignee: Optional[str] = None
@@ -253,11 +261,81 @@ class ViolationClue(ViolationClueBase):
     assigned_at: Optional[datetime] = None
     conclusion: Optional[str] = None
     verified_at: Optional[datetime] = None
+    # 举报人信息按角色裁剪后的视图（原始字段不下发）
+    reporter: Optional[Dict[str, Any]] = None
     created_at: datetime
     updated_at: datetime
 
     class Config:
         from_attributes = True
+
+
+class LeaseAcquire(BaseModel):
+    holder: str = Field(..., description="认领人")
+    role: UserRole = UserRole.INVESTIGATOR
+    ttl_minutes: Optional[int] = Field(None, ge=1, le=480, description="租约时长（分钟）")
+    reason: Optional[str] = None
+
+
+class LeaseRenew(BaseModel):
+    holder: str
+    role: UserRole = UserRole.INVESTIGATOR
+    version: int = Field(..., description="当前持有的租约版本号")
+    reason: str = Field(..., min_length=1, description="续租原因（必填）")
+    ttl_minutes: Optional[int] = Field(None, ge=1, le=480)
+
+
+class LeaseRelease(BaseModel):
+    holder: str
+    role: UserRole = UserRole.INVESTIGATOR
+    version: int = Field(..., description="当前持有的租约版本号")
+    reason: str = Field(..., min_length=1, description="释放原因（必填）")
+
+
+class LeaseForceAssign(BaseModel):
+    supervisor: str = Field(..., description="执行转派的主管")
+    supervisor_role: UserRole = UserRole.SUPERVISOR
+    new_holder: str = Field(..., description="新承办人")
+    new_holder_role: UserRole = UserRole.INVESTIGATOR
+    reason: str = Field(..., min_length=1, description="强制转派原因（必填）")
+    expected_version: Optional[int] = Field(None, description="主管所见租约版本（可选乐观锁）")
+
+
+class LeaseOperationRequest(BaseModel):
+    """提交核查记录 / 结案时携带的租约持有者与版本。"""
+    holder: str
+    role: UserRole = UserRole.INVESTIGATOR
+    lease_version: int = Field(..., description="当前租约版本号")
+
+
+class LeaseView(BaseModel):
+    lease_id: int
+    clue_id: int
+    version: int
+    holder: str
+    holder_role: Optional[str] = None
+    status: Optional[str] = None
+    acquired_at: Optional[datetime] = None
+    expires_at: Optional[datetime] = None
+    renewed_at: Optional[datetime] = None
+    released_at: Optional[datetime] = None
+    evidence_hash: str
+    permissions: List[str] = []
+    close_reason: Optional[str] = None
+    evidence_summary: Optional[Dict[str, Any]] = None
+
+
+class LeaseEventView(BaseModel):
+    event_id: int
+    lease_id: int
+    clue_id: int
+    event_type: Optional[str] = None
+    actor: str
+    actor_role: Optional[str] = None
+    from_version: Optional[int] = None
+    to_version: Optional[int] = None
+    reason: str
+    created_at: Optional[datetime] = None
 
 
 class ClueAssign(BaseModel):
@@ -267,6 +345,10 @@ class ClueAssign(BaseModel):
 class ClueConclusion(BaseModel):
     status: ClueStatus
     conclusion: str
+    # 租约模式下必填：提交人及其持有的租约版本
+    holder: Optional[str] = None
+    lease_version: Optional[int] = None
+    role: UserRole = UserRole.INVESTIGATOR
 
 
 class InspectionRecordBase(BaseModel):
@@ -278,7 +360,10 @@ class InspectionRecordBase(BaseModel):
 
 
 class InspectionRecordCreate(InspectionRecordBase):
-    pass
+    # 租约模式下必填：提交人及其持有的租约版本（inspector 默认为 holder）
+    holder: Optional[str] = None
+    lease_version: Optional[int] = None
+    role: UserRole = UserRole.INVESTIGATOR
 
 
 class InspectionRecord(InspectionRecordBase):
